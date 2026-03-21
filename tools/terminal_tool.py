@@ -3,18 +3,22 @@
 Terminal Tool Module
 
 A terminal tool that executes commands in local, Docker, Modal, SSH, Singularity, and Daytona environments.
-Supports local execution, Docker containers, and Modal cloud sandboxes.
+Supports local execution, containerized backends, and Modal cloud sandboxes, including managed gateway mode.
 
 Environment Selection (via TERMINAL_ENV environment variable):
 - "local": Execute directly on the host machine (default, fastest)
 - "docker": Execute in Docker containers (isolated, requires Docker)
-- "modal": Execute in Modal cloud sandboxes (scalable, requires Modal account)
+- "modal": Execute in Modal cloud sandboxes (direct Modal or managed gateway)
 
 Features:
 - Multiple execution backends (local, docker, modal)
 - Background task support
 - VM/container lifecycle management
 - Automatic cleanup after inactivity
+
+Cloud sandbox note:
+- Persistent filesystems preserve working state across sandbox recreation
+- Persistent filesystems do NOT guarantee the same live sandbox or long-running processes survive cleanup, idle reaping, or Hermes exit
 
 Usage:
     from terminal_tool import terminal_tool
@@ -48,6 +52,11 @@ logger = logging.getLogger(__name__)
 # long-running subprocesses immediately instead of blocking until timeout.
 # ---------------------------------------------------------------------------
 from tools.interrupt import is_interrupted, _interrupt_event  # noqa: F401 — re-exported
+
+
+def ensure_minisweagent_on_path(_repo_root: Path | None = None) -> None:
+    """Backward-compatible no-op after minisweagent_path.py removal."""
+    return
 
 
 # =============================================================================
@@ -366,7 +375,7 @@ from tools.managed_tool_gateway import is_managed_tool_gateway_ready
 
 
 # Tool description for LLM
-TERMINAL_TOOL_DESCRIPTION = """Execute shell commands on a Linux environment. Filesystem persists between calls.
+TERMINAL_TOOL_DESCRIPTION = """Execute shell commands on a Linux environment. Filesystem usually persists between calls.
 
 Do NOT use cat/head/tail to read files — use read_file instead.
 Do NOT use grep/rg/find to search — use search_files instead.
@@ -382,6 +391,7 @@ Working directory: Use 'workdir' for per-command cwd.
 PTY mode: Set pty=true for interactive CLI tools (Codex, Claude Code, Python REPL).
 
 Do NOT use vim/nano/interactive tools without pty=true — they hang without a pseudo-terminal. Pipe git output to cat if it might page.
+Important: cloud sandboxes may be cleaned up, idled out, or recreated between turns. Persistent filesystem means files can resume later; it does NOT guarantee a continuously running machine or surviving background processes. Use terminal sandboxes for task work, not durable hosting.
 """
 
 # Global state for environment lifecycle management
@@ -1187,10 +1197,14 @@ def terminal_tool(
             }, ensure_ascii=False)
 
     except Exception as e:
+        import traceback
+        tb_str = traceback.format_exc()
+        logger.error("terminal_tool exception:\n%s", tb_str)
         return json.dumps({
             "output": "",
             "exit_code": -1,
             "error": f"Failed to execute command: {str(e)}",
+            "traceback": tb_str,
             "status": "error"
         }, ensure_ascii=False)
 
@@ -1230,18 +1244,25 @@ def check_terminal_requirements() -> bool:
             return True
 
         elif env_type == "modal":
-            if importlib.util.find_spec("swerex") is None:
-                logger.error("swe-rex is required for modal terminal backend: pip install 'swe-rex[modal]'")
-                return False
-            has_token = os.getenv("MODAL_TOKEN_ID") is not None
-            has_config = Path.home().joinpath(".modal.toml").exists()
-            if not (has_token or has_config):
+            has_direct_modal = (
+                (os.getenv("MODAL_TOKEN_ID") and os.getenv("MODAL_TOKEN_SECRET"))
+                or Path.home().joinpath(".modal.toml").exists()
+            )
+            if not has_direct_modal and is_managed_tool_gateway_ready("modal"):
+                return True
+
+            if not has_direct_modal:
                 logger.error(
-                    "Modal backend selected but no MODAL_TOKEN_ID environment variable "
-                    "or ~/.modal.toml config file was found. Configure Modal or choose "
-                    "a different TERMINAL_ENV."
+                    "Modal backend selected but no direct Modal credentials/config or managed "
+                    "tool gateway was found. Configure Modal, set up the managed gateway, "
+                    "or choose a different TERMINAL_ENV."
                 )
                 return False
+
+            if importlib.util.find_spec("swerex") is None:
+                logger.error("swe-rex is required for direct modal terminal backend: pip install 'swe-rex[modal]'")
+                return False
+
             return True
 
         elif env_type == "daytona":
