@@ -3184,6 +3184,17 @@ SETUP_SECTIONS = [
     ("agent", "Agent Settings", setup_agent_settings),
 ]
 
+# The returning-user menu intentionally omits standalone TTS because model setup
+# already includes TTS selection and tools setup covers the rest of the provider
+# configuration. Keep this list in the same order as the visible menu entries.
+RETURNING_USER_MENU_SECTION_KEYS = [
+    "model",
+    "terminal",
+    "gateway",
+    "tools",
+    "agent",
+]
+
 
 def run_setup_wizard(args):
     """Run the interactive setup wizard.
@@ -3332,8 +3343,7 @@ def run_setup_wizard(args):
             # Individual section — map by key, not by position.
             # SETUP_SECTIONS includes TTS but the returning-user menu skips it,
             # so positional indexing (choice - 3) would dispatch the wrong section.
-            _RETURNING_USER_SECTION_KEYS = ["model", "terminal", "gateway", "tools", "agent"]
-            section_key = _RETURNING_USER_SECTION_KEYS[choice - 3]
+            section_key = RETURNING_USER_MENU_SECTION_KEYS[choice - 3]
             section = next((s for s in SETUP_SECTIONS if s[0] == section_key), None)
             if section:
                 _, label, func = section
