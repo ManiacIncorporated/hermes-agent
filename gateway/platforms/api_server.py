@@ -397,6 +397,28 @@ class APIServerAdapter(BasePlatformAdapter):
         """GET /health — simple health check."""
         return web.json_response({"status": "ok", "platform": "hermes-agent"})
 
+    async def _handle_commands(self, request: "web.Request") -> "web.Response":
+        """GET /v1/commands — return the slash command registry for UI pickers."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        from hermes_cli.commands import COMMAND_REGISTRY
+
+        commands = []
+        for cmd in COMMAND_REGISTRY:
+            if cmd.cli_only:
+                continue
+            commands.append({
+                "name": cmd.name,
+                "description": cmd.description,
+                "category": cmd.category,
+                "aliases": list(cmd.aliases),
+                "args": cmd.args_hint or None,
+            })
+
+        return web.json_response({"commands": commands})
+
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — return hermes-agent as an available model."""
         auth_err = self._check_auth(request)
@@ -1245,6 +1267,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app["api_server_adapter"] = self
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_get("/v1/models", self._handle_models)
+            self._app.router.add_get("/v1/commands", self._handle_commands)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/message", self._handle_message_endpoint)
             self._app.router.add_post("/v1/responses", self._handle_responses)
