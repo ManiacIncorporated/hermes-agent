@@ -1166,6 +1166,70 @@ class APIServerAdapter(BasePlatformAdapter):
         return await loop.run_in_executor(None, _run)
 
     # ------------------------------------------------------------------
+    # Gateway message endpoint — routes through _handle_message for
+    # full command dispatch + agent execution in one path.
+    # ------------------------------------------------------------------
+
+    async def _handle_message_endpoint(self, request: "web.Request") -> "web.Response":
+        """POST /v1/message — send text through the gateway message pipeline.
+
+        Accepts: { "text": "...", "session_id": "..." }
+        Returns: { "response": "..." }
+
+        Slash commands are dispatched through the gateway's command registry.
+        Regular text goes to the agent via the normal gateway flow.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response(
+                _openai_error("Invalid JSON in request body"), status=400
+            )
+
+        text = body.get("text", "").strip()
+        if not text:
+            return web.json_response(
+                _openai_error("Missing 'text' field"), status=400
+            )
+
+        session_id = body.get("session_id", str(uuid.uuid4()))
+
+        if not self._message_handler:
+            return web.json_response(
+                _openai_error("Gateway message handler not available", err_type="server_error"),
+                status=503,
+            )
+
+        from gateway.platforms.base import MessageEvent
+        from gateway.session import SessionSource
+        from gateway.config import Platform
+
+        event = MessageEvent(
+            text=text,
+            source=SessionSource(
+                platform=Platform.API_SERVER,
+                chat_id=session_id,
+                user_id=session_id,
+                chat_type="dm",
+            ),
+        )
+
+        try:
+            response = await self._message_handler(event)
+        except Exception as e:
+            logger.error("Gateway message handler error: %s", e, exc_info=True)
+            return web.json_response(
+                _openai_error(f"Internal error: {e}", err_type="server_error"),
+                status=500,
+            )
+
+        return web.json_response({"response": response or ""})
+
+    # ------------------------------------------------------------------
     # BasePlatformAdapter interface
     # ------------------------------------------------------------------
 
@@ -1182,6 +1246,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
+            self._app.router.add_post("/v1/message", self._handle_message_endpoint)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
