@@ -1770,6 +1770,27 @@ class GatewayRunner:
         if canonical == "voice":
             return await self._handle_voice_command(event)
 
+        if canonical == "config":
+            return await self._handle_config_command(event)
+
+        if canonical == "toolsets":
+            return await self._handle_toolsets_command(event)
+
+        if canonical == "tools":
+            return await self._handle_tools_command(event)
+
+        if canonical == "history":
+            return await self._handle_history_command(event)
+
+        if canonical == "prompt":
+            return await self._handle_prompt_command(event)
+
+        if canonical == "cron":
+            return await self._handle_cron_command(event)
+
+        if canonical == "plugins":
+            return await self._handle_plugins_command(event)
+
         # User-defined quick commands (bypass agent loop, no LLM call)
         if command:
             if isinstance(self.config, dict):
@@ -4405,6 +4426,360 @@ class GatewayRunner:
                 exit_code_path.unlink(missing_ok=True)
 
         return True
+
+    # ------------------------------------------------------------------
+    # Handlers for commands promoted from cli_only → gateway
+    # ------------------------------------------------------------------
+
+    async def _handle_config_command(self, event: MessageEvent) -> str:
+        """Handle /config — show runtime configuration."""
+        import yaml
+
+        config_path = _hermes_home / "config.yaml"
+        cfg = {}
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+        except Exception:
+            pass
+
+        model_cfg = cfg.get("model", {}) if isinstance(cfg.get("model"), dict) else {}
+        model = model_cfg.get("model") or os.getenv("OPENROUTER_MODEL", "unknown")
+        provider = model_cfg.get("provider") or "openrouter"
+        base_url = model_cfg.get("base_url") or os.getenv("OPENAI_BASE_URL", "")
+        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY", "")
+        masked_key = f"********{api_key[-4:]}" if api_key and len(api_key) > 4 else "Not set"
+
+        agent_cfg = cfg.get("agent", {}) if isinstance(cfg.get("agent"), dict) else {}
+        max_turns = agent_cfg.get("max_turns", os.getenv("HERMES_MAX_ITERATIONS", "90"))
+
+        session_entry = self.session_store.get_or_create_session(event.source)
+
+        lines = [
+            "⚙️ **Configuration**",
+            "",
+            "**Model**",
+            f"  Provider: `{provider}`",
+            f"  Model: `{model}`",
+            f"  Base URL: `{base_url or '(default)'}`",
+            f"  API Key: `{masked_key}`",
+            "",
+            "**Agent**",
+            f"  Max turns: {max_turns}",
+            f"  Session: `{session_entry.session_id[:12]}…`",
+            "",
+            f"**Config file:** `{config_path}`",
+        ]
+        return "\n".join(lines)
+
+    async def _handle_toolsets_command(self, event: MessageEvent) -> str:
+        """Handle /toolsets — list available toolsets."""
+        try:
+            from toolsets import get_all_toolsets, get_toolset_info
+        except ImportError:
+            return "Toolsets module not available."
+
+        source = event.source
+        session_entry = self.session_store.get_or_create_session(source)
+        enabled = set()
+        agent = self._running_agents.get(session_entry.session_key)
+        if agent and agent is not _AGENT_PENDING_SENTINEL and hasattr(agent, "enabled_toolsets"):
+            enabled = set(agent.enabled_toolsets or [])
+
+        all_toolsets = get_all_toolsets()
+        lines = ["🧰 **Available Toolsets**", ""]
+
+        for name in sorted(all_toolsets.keys()):
+            info = get_toolset_info(name)
+            if info:
+                marker = "✅" if name in enabled else "  "
+                lines.append(
+                    f"{marker} `{name}` — [{info['tool_count']} tools] {info['description']}"
+                )
+        lines.append("")
+        lines.append("✅ = currently enabled")
+        return "\n".join(lines)
+
+    async def _handle_tools_command(self, event: MessageEvent) -> str:
+        """Handle /tools [list|disable|enable] — manage tools."""
+        import shlex
+
+        args_text = event.get_command_args().strip()
+        try:
+            parts = shlex.split(args_text) if args_text else []
+        except ValueError:
+            parts = args_text.split()
+
+        subcommand = parts[0] if parts else ""
+
+        if subcommand == "list":
+            try:
+                from argparse import Namespace
+                from hermes_cli.tools_config import tools_disable_enable_command
+                import io, contextlib
+
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    tools_disable_enable_command(
+                        Namespace(tools_action="list", platform="gateway")
+                    )
+                output = buf.getvalue().strip()
+                return output if output else "No tools information available."
+            except Exception as e:
+                return f"Error listing tools: {e}"
+
+        if subcommand in ("disable", "enable"):
+            names = parts[1:]
+            if not names:
+                return f"Usage: `/tools {subcommand} <name> [name ...]`"
+            try:
+                from argparse import Namespace
+                from hermes_cli.tools_config import tools_disable_enable_command
+                import io, contextlib
+
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    tools_disable_enable_command(
+                        Namespace(tools_action=subcommand, names=names, platform="gateway")
+                    )
+                output = buf.getvalue().strip()
+                return output if output else f"Tools {subcommand}d: {', '.join(names)}"
+            except Exception as e:
+                return f"Error: {e}"
+
+        # Default: show toolset summary
+        return await self._handle_toolsets_command(event)
+
+    async def _handle_history_command(self, event: MessageEvent) -> str:
+        """Handle /history — show conversation history summary."""
+        source = event.source
+        session_entry = self.session_store.get_or_create_session(source)
+        history = list(session_entry.conversation_history or [])
+
+        if not history:
+            return "No conversation history yet."
+
+        preview_limit = 300
+        lines = ["📜 **Conversation History**", ""]
+        visible = 0
+        tool_count = 0
+
+        for msg in history:
+            role = msg.get("role", "")
+            if role == "tool":
+                tool_count += 1
+                continue
+            if role not in ("user", "assistant"):
+                continue
+
+            if tool_count > 0:
+                noun = "message" if tool_count == 1 else "messages"
+                lines.append(f"  _({tool_count} tool {noun})_")
+                tool_count = 0
+
+            visible += 1
+            content = str(msg.get("content") or "")
+
+            if role == "user":
+                preview = content[:preview_limit]
+                suffix = "…" if len(content) > preview_limit else ""
+                lines.append(f"**You #{visible}:** {preview}{suffix}")
+            else:
+                tool_calls = msg.get("tool_calls") or []
+                if content:
+                    preview = content[:preview_limit]
+                    suffix = "…" if len(content) > preview_limit else ""
+                    lines.append(f"**Assistant #{visible}:** {preview}{suffix}")
+                elif tool_calls:
+                    lines.append(f"**Assistant #{visible}:** _(requested {len(tool_calls)} tool calls)_")
+                else:
+                    lines.append(f"**Assistant #{visible}:** _(no text)_")
+
+        if tool_count > 0:
+            noun = "message" if tool_count == 1 else "messages"
+            lines.append(f"  _({tool_count} tool {noun})_")
+
+        lines.append(f"\n_{visible} exchanges total_")
+        return "\n".join(lines)
+
+    async def _handle_prompt_command(self, event: MessageEvent) -> str:
+        """Handle /prompt [text|clear] — view or set system prompt."""
+        import yaml
+
+        args = event.get_command_args().strip()
+        source = event.source
+        session_entry = self.session_store.get_or_create_session(source)
+        session_key = session_entry.session_key
+
+        if args:
+            config_path = _hermes_home / "config.yaml"
+            if args.lower() == "clear":
+                try:
+                    if config_path.exists():
+                        with open(config_path, encoding="utf-8") as f:
+                            cfg = yaml.safe_load(f) or {}
+                        if isinstance(cfg.get("agent"), dict):
+                            cfg["agent"]["system_prompt"] = ""
+                        with open(config_path, "w", encoding="utf-8") as f:
+                            yaml.safe_dump(cfg, f)
+                except Exception:
+                    pass
+                # Clear any cached agent so next run picks up the change
+                self._running_agents.pop(session_key, None)
+                return "System prompt cleared."
+
+            # Set new prompt
+            try:
+                cfg = {}
+                if config_path.exists():
+                    with open(config_path, encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f) or {}
+                if not isinstance(cfg.get("agent"), dict):
+                    cfg["agent"] = {}
+                cfg["agent"]["system_prompt"] = args
+                with open(config_path, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(cfg, f)
+            except Exception:
+                pass
+            self._running_agents.pop(session_key, None)
+            preview = args[:60] + ("…" if len(args) > 60 else "")
+            return f"System prompt set: \"{preview}\""
+
+        # View current prompt
+        config_path = _hermes_home / "config.yaml"
+        prompt = ""
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                prompt = (cfg.get("agent", {}) or {}).get("system_prompt", "")
+        except Exception:
+            pass
+
+        if prompt:
+            return f"📝 **System Prompt**\n\n{prompt}\n\nUsage: `/prompt <text>` to change, `/prompt clear` to remove."
+        return "No custom system prompt set.\n\nUsage: `/prompt <text>` to set one."
+
+    async def _handle_cron_command(self, event: MessageEvent) -> str:
+        """Handle /cron [list|add|edit|pause|resume|run|remove] — manage scheduled tasks."""
+        import json as _json
+        import shlex
+
+        try:
+            from tools.cronjob_tools import cronjob as cronjob_tool
+        except ImportError:
+            return "Cron module not available in this environment."
+
+        def _api(**kwargs):
+            return _json.loads(cronjob_tool(**kwargs))
+
+        args_text = event.get_command_args().strip()
+        try:
+            tokens = shlex.split(args_text) if args_text else []
+        except ValueError:
+            tokens = args_text.split()
+
+        # No subcommand or bare /cron → list
+        if not tokens or tokens[0] == "list":
+            include_disabled = "--all" in tokens
+            result = _api(action="list", include_disabled=include_disabled)
+            jobs = result.get("jobs", []) if result.get("success") else []
+            if not jobs:
+                return "No scheduled jobs."
+            lines = ["📅 **Scheduled Jobs**", ""]
+            for job in jobs:
+                state = job.get("state", "?")
+                lines.append(f"**{job.get('name', 'Untitled')}** (`{job['job_id'][:12]}`)")
+                lines.append(f"  Schedule: {job['schedule']} | State: {state}")
+                if job.get("skills"):
+                    lines.append(f"  Skills: {', '.join(job['skills'])}")
+                if job.get("prompt_preview"):
+                    lines.append(f"  Prompt: {job['prompt_preview']}")
+                if job.get("next_run_at"):
+                    lines.append(f"  Next: {job['next_run_at']}")
+                lines.append("")
+            return "\n".join(lines)
+
+        sub = tokens[0].lower()
+        rest = tokens[1:]
+
+        if sub in ("add", "create"):
+            if len(rest) < 2:
+                return 'Usage: `/cron add "schedule" "prompt"`'
+            schedule = rest[0]
+            prompt = " ".join(rest[1:])
+            result = _api(action="create", schedule=schedule, prompt=prompt)
+            if result.get("success"):
+                return f"✅ Created job `{result['job_id'][:12]}` — schedule: {result['schedule']}, next: {result.get('next_run_at', '?')}"
+            return f"❌ {result.get('error', 'Unknown error')}"
+
+        if sub == "pause" and rest:
+            result = _api(action="pause", job_id=rest[0])
+            return f"⏸ Job paused." if result.get("success") else f"❌ {result.get('error')}"
+
+        if sub == "resume" and rest:
+            result = _api(action="resume", job_id=rest[0])
+            return f"▶️ Job resumed." if result.get("success") else f"❌ {result.get('error')}"
+
+        if sub == "run" and rest:
+            result = _api(action="trigger", job_id=rest[0])
+            return f"🚀 Job triggered." if result.get("success") else f"❌ {result.get('error')}"
+
+        if sub in ("remove", "rm", "delete") and rest:
+            result = _api(action="remove", job_id=rest[0])
+            return f"🗑 Job removed." if result.get("success") else f"❌ {result.get('error')}"
+
+        if sub == "edit" and rest:
+            job_id = rest[0]
+            # Parse --key value pairs from remaining tokens
+            updates = {}
+            i = 1
+            while i < len(rest):
+                if rest[i].startswith("--") and i + 1 < len(rest):
+                    key = rest[i][2:]
+                    updates[key] = rest[i + 1]
+                    i += 2
+                else:
+                    i += 1
+            if not updates:
+                return "Usage: `/cron edit <id> --schedule \"...\" --prompt \"...\"`"
+            result = _api(action="update", job_id=job_id, **updates)
+            return f"✅ Job updated." if result.get("success") else f"❌ {result.get('error')}"
+
+        return (
+            "**Cron Commands**\n"
+            "`/cron list` — list jobs\n"
+            '`/cron add "schedule" "prompt"` — create job\n'
+            "`/cron edit <id> --schedule ... --prompt ...` — edit\n"
+            "`/cron pause <id>` | `/cron resume <id>` | `/cron run <id>` | `/cron remove <id>`"
+        )
+
+    async def _handle_plugins_command(self, event: MessageEvent) -> str:
+        """Handle /plugins — list installed plugins."""
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+            pm = get_plugin_manager()
+            plugins = pm.list_plugins()
+        except Exception:
+            return "Plugin system not available."
+
+        if not plugins:
+            return "No plugins installed."
+
+        lines = ["🔌 **Installed Plugins**", ""]
+        for p in plugins:
+            name = p.get("name", "unknown")
+            enabled = "✅" if p.get("enabled") else "❌"
+            version = p.get("version", "?")
+            tools = p.get("tool_count", 0)
+            hooks = p.get("hook_count", 0)
+            lines.append(f"{enabled} **{name}** v{version} — {tools} tools, {hooks} hooks")
+            if p.get("errors"):
+                for err in p["errors"]:
+                    lines.append(f"  ⚠️ {err}")
+
+        return "\n".join(lines)
 
     def _set_session_env(self, context: SessionContext) -> None:
         """Set environment variables for the current session."""

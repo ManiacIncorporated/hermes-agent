@@ -48,8 +48,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                aliases=("reset",)),
     CommandDef("clear", "Clear screen and start a new session", "Session",
                cli_only=True),
-    CommandDef("history", "Show conversation history", "Session",
-               cli_only=True),
+    CommandDef("history", "Show conversation history", "Session"),
     CommandDef("save", "Save the current conversation", "Session",
                cli_only=True),
     CommandDef("retry", "Retry the last message (resend to agent)", "Session"),
@@ -76,12 +75,11 @@ COMMAND_REGISTRY: list[CommandDef] = [
                args_hint="[name]"),
 
     # Configuration
-    CommandDef("config", "Show current configuration", "Configuration",
-               cli_only=True),
+    CommandDef("config", "Show current configuration", "Configuration"),
     CommandDef("provider", "Show available providers and current provider",
                "Configuration"),
     CommandDef("prompt", "View/set custom system prompt", "Configuration",
-               cli_only=True, args_hint="[text]", subcommands=("clear",)),
+               args_hint="[text]", subcommands=("clear",)),
     CommandDef("personality", "Set a predefined personality", "Configuration",
                args_hint="[name]"),
     CommandDef("statusbar", "Toggle the context/model status bar", "Configuration",
@@ -98,14 +96,13 @@ COMMAND_REGISTRY: list[CommandDef] = [
 
     # Tools & Skills
     CommandDef("tools", "Manage tools: /tools [list|disable|enable] [name...]", "Tools & Skills",
-               args_hint="[list|disable|enable] [name...]", cli_only=True),
-    CommandDef("toolsets", "List available toolsets", "Tools & Skills",
-               cli_only=True),
+               args_hint="[list|disable|enable] [name...]"),
+    CommandDef("toolsets", "List available toolsets", "Tools & Skills"),
     CommandDef("skills", "Search, install, inspect, or manage skills",
                "Tools & Skills", cli_only=True,
                subcommands=("search", "browse", "inspect", "install")),
     CommandDef("cron", "Manage scheduled tasks", "Tools & Skills",
-               cli_only=True, args_hint="[subcommand]",
+               args_hint="[subcommand]",
                subcommands=("list", "add", "create", "edit", "pause", "resume", "run", "remove")),
     CommandDef("reload-mcp", "Reload MCP servers from config", "Tools & Skills",
                aliases=("reload_mcp",)),
@@ -113,7 +110,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True, args_hint="[connect|disconnect|status]",
                subcommands=("connect", "disconnect", "status")),
     CommandDef("plugins", "List installed plugins and their status",
-               "Tools & Skills", cli_only=True),
+               "Tools & Skills"),
 
     # Info
     CommandDef("help", "Show available commands", "Info"),
